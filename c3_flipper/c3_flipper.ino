@@ -14,6 +14,7 @@
 #include <Wire.h>
 #include <U8g2lib.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <WiFiUdp.h>
 #include <time.h>
 #include <Preferences.h>
@@ -372,30 +373,83 @@ void connectingAnim(const char* ssid, uint32_t t) {
   d.display();
 }
 
-bool connectAnimated(const char* ssid, const char* pass, uint32_t timeoutMs = 15000) {
-  Serial.printf("[wifi] connecting to '%s'...\n", ssid);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, pass);
-  uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    connectingAnim(ssid, millis());
-    if (millis() - t0 > timeoutMs) {
-      Serial.printf("[wifi] FAIL after %lums status=%d\n", (unsigned long)timeoutMs, WiFi.status());
-      WiFi.disconnect();
-      beepWait(200, 300);
-      return false;
-    }
-    if (pollEvent() == EV_EXIT) {
-      Serial.println("[wifi] cancelled by user");
-      WiFi.disconnect();
-      beep(400, 100);
-      return false;
+// ---------- wifi failure reason (из системных событий) ----------
+// 0 = нет информации; иначе 802.11 reason code
+volatile int wifiFailReason = 0;
+volatile bool wifiGotEvent = false;
+void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  wifiGotEvent = true;
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: wifiFailReason = info.wifi_sta_disconnected.reason; break;
+    case ARDUINO_EVENT_WIFI_STA_AUTHMODE_CHANGE: wifiFailReason = 0; break;  // ещё пытается
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED: wifiFailReason = 0; break;
+    default: break;
+  }
+}
+const char* wifiFailText(int reason) {
+  switch (reason) {
+    case 201: return "AUTH FAILED (201)";
+    case 202: return "AP NOT FOUND (202)";
+    case 203: return "ASSOC FAIL (203)";
+    case 204: return "HANDSHAKE TMO (204)";
+    case 15:  return "4WAY HANDSHAKE TMO";
+    case 2:   return "AUTH EXPIRED";
+    default: {
+      static char buf[20];
+      snprintf(buf, sizeof buf, "REASON %d", reason);
+      return buf;
     }
   }
-  Serial.printf("[wifi] CONNECTED ip=%s\n", WiFi.localIP().toString().c_str());
-  beep(1300, 60); delay(30); beep(1700, 80);
-  ntpConfig();
-  return true;
+}
+bool connectAnimated(const char* ssid, const char* pass, uint32_t timeoutMs = 15000) {
+  Serial.printf("[wifi] connecting to '%s'...\n", ssid);
+  wifiFailReason = 0; wifiGotEvent = false;
+  static bool evRegistered = false;
+  if (!evRegistered) { WiFi.onEvent(onWifiEvent); evRegistered = true; }
+  WiFi.mode(WIFI_STA);
+  WiFi.setMinSecurity(WIFI_AUTH_WPA_PSK);   // смешанные WPA/WPA2-TKIP/AES сети
+  WiFi.disconnect(true);
+  delay(80);
+
+  // ДЕФЕКТ SUPERMINI: отражения в антенной цепи ломают handshake при
+  // полной мощности (reason 2/3 при верном пароле). Лечение (Arduino
+  // forum, подтверждено многократно): сизить TX-мощность до 8.5 dBm.
+  // Ступени: 8.5dBm (рабочий фикс) -> 5dBm -> 11dBm -> 19.5dBm (стандарт)
+  static const wifi_power_t txSteps[] = { WIFI_POWER_8_5dBm, WIFI_POWER_5dBm, WIFI_POWER_11dBm, WIFI_POWER_19_5dBm };
+
+  for (int stage = 0; stage < 4; stage++) {
+    WiFi.setTxPower(txSteps[stage]);
+    wifi_config_t conf;
+    memset(&conf, 0, sizeof(conf));
+    conf.sta.pmf_cfg.capable = false;
+    conf.sta.pmf_cfg.required = false;
+    esp_wifi_set_config(WIFI_IF_STA, &conf);
+    wifiFailReason = 0;
+    Serial.printf("[wifi] attempt %d (tx %d, pmf off)\n", stage + 1, (int)txSteps[stage]);
+    WiFi.begin(ssid, pass);
+
+    uint32_t t0 = millis();
+    uint32_t budget = timeoutMs / 4;
+    bool cancelled = false;
+    while (WiFi.status() != WL_CONNECTED) {
+      connectingAnim(ssid, millis());
+      if (millis() - t0 > budget) break;
+      if (pollEvent() == EV_EXIT) { cancelled = true; break; }
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf("[wifi] CONNECTED ip=%s (tx=%d)\n", WiFi.localIP().toString().c_str(), (int)txSteps[stage]);
+      beep(1300, 60); delay(30); beep(1700, 80);
+      ntpConfig();
+      return true;
+    }
+    WiFi.disconnect();
+    if (cancelled) { Serial.println("[wifi] cancelled by user"); beep(400, 100); return false; }
+    Serial.printf("[wifi] attempt %d failed status=%d reason=%d\n", stage + 1, WiFi.status(), wifiFailReason);
+    if (stage < 3) { beepWait(200, 150); delay(150); }
+  }
+  Serial.printf("[wifi] FAIL after %lums reason=%d\n", (unsigned long)timeoutMs, wifiFailReason);
+  beepWait(200, 300);
+  return false;
 }
 
 // ==================================================================
@@ -413,6 +467,8 @@ void drawKey(int x, int y, int w, const char* label, bool cur) {
   u8g2.drawUTF8(x + (w - lw) / 2, y + 1 + u8g2.getAscent(), label);
 }
 
+uint32_t kbLastTypeAt = 0;   // время последнего ввода — чтобы показать символ перед звёздочкой
+
 void drawKeyboard(int row, int col, int page, const char* typed) {
   d.clearDisplay();
   headerBar(page == 0 ? "PASSWORD abc" : page == 1 ? "PASSWORD ABC" : "PASSWORD 123");
@@ -423,10 +479,10 @@ void drawKeyboard(int row, int col, int page, const char* typed) {
   int tl = strlen(typed);
   int show = tl > 20 ? 20 : tl;
   int xx = 5;
+  bool showLast = tl > 0 && (millis() - kbLastTypeAt) < 1500;   // символ виден 1.5с после ввода
   d.setCursor(xx, 16);
   for (int i = 0; i < show; i++) {
-    bool last = (i == show - 1);
-    if (last && (millis() / 400) % 2) u8g2.drawUTF8(xx + i * 6, 16 + u8g2.getAscent(), &typed[tl - 1]);
+    if (i == show - 1 && showLast) u8g2.drawUTF8(xx + i * 6, 16 + u8g2.getAscent(), &typed[tl - 1]);
     else d.print('*');
   }
   if ((millis() / 400) % 2) d.fillRect(5 + show * 6, 16, 5, 7, 1);
@@ -467,11 +523,11 @@ void inputPassword(char* out, int maxLen) {
     if (e == EV_OK) {
       if (row < 3) {
         const char** rows = page == 0 ? KB_L : page == 1 ? KB_U : KB_D;
-        if (len < maxLen - 1) { out[len++] = rows[row][col]; out[len] = 0; beep(1100, 20); }
+        if (len < maxLen - 1) { out[len++] = rows[row][col]; out[len] = 0; beep(1100, 20); kbLastTypeAt = millis(); }
         else beep(200, 60);
       } else if (col < 2) { page = (page + 1) % 3; beep(900, 30); }
-      else if (col < 6) { if (len < maxLen - 1) { out[len++] = ' '; out[len] = 0; beep(1100, 20); } }
-      else if (col < 8) { if (len > 0) { len--; out[len] = 0; beep(700, 25); } }
+      else if (col < 6) { if (len < maxLen - 1) { out[len++] = ' '; out[len] = 0; beep(1100, 20); kbLastTypeAt = millis(); } }
+      else if (col < 8) { if (len > 0) { len--; out[len] = 0; beep(700, 25); kbLastTypeAt = millis(); } }
       else { beep(1500, 50); return; }
     }
   }
@@ -482,25 +538,26 @@ void inputPassword(char* out, int maxLen) {
 // ==================================================================
 int askRetryForgetExit() {
   int sel = 0;
-  const char* items[3] = { "RETRY same password", "FORGET network", "EXIT to menu" };
+  const char* items[4] = { "RETRY same password", "RE-ENTER password", "FORGET network", "EXIT to menu" };
   while (true) {
     Ev e = pollEvent();
-    if (e == EV_EXIT) return 2;
+    if (e == EV_EXIT) return 3;
     if (e == EV_UP   && sel > 0) { sel--; beep(900, 15); }
-    if (e == EV_DOWN && sel < 2) { sel++; beep(900, 15); }
+    if (e == EV_DOWN && sel < 3) { sel++; beep(900, 15); }
     if (e == EV_OK) { beep(1200, 40); return sel; }
     d.clearDisplay();
     headerBar("CONNECT FAILED");
     d.setTextColor(1); d.setTextSize(1);
-    d.setCursor(4, 16); d.print("Cannot connect. Why?");
-    d.setCursor(4, 26); d.print("- wrong password?");
-    d.setCursor(4, 36); d.print("- weak signal? 2.4GHz?");
-    for (int i = 0; i < 3; i++) {
-      int y = 40 + i * 9;
+    d.setCursor(4, 16); d.print("Cannot connect.");
+    d.setCursor(4, 25); d.print("AP says:");
+    d.setCursor(4, 34); d.print(wifiFailReason ? wifiFailText(wifiFailReason) : "TIMEOUT / no reply");
+    for (int i = 0; i < 4; i++) {
+      int y = 42 + i * 7;
       if (y > 62) break;
-      if (i == sel) { d.fillRect(0, y - 1, W, 10, 1); d.setTextColor(0); }
+      if (i == sel) { d.fillRect(0, y - 1, W, 8, 1); d.setTextColor(0); }
       else d.setTextColor(1);
-      d.setCursor(4, y); d.print(items[i]);
+      d.setTextSize(4); d.setCursor(4, y); d.print(items[i]);
+      d.setTextSize(1);
     }
     d.display();
   }
@@ -548,10 +605,18 @@ void appNet() {
     d.setCursor(28, 36); d.print(wifiSSID);
     d.display(); delay(300);
     Serial.printf("[net] saved: ssid='%s'\n", wifiSSID);
-    if (connectAnimated(wifiSSID, wifiPASS, 15000)) goto ntpScreen;
-    int ch = askRetryForgetExit();
-    if (ch == 0 && connectAnimated(wifiSSID, wifiPASS, 15000)) goto ntpScreen;
-    if (ch == 1) showWrongPassword(wifiSSID);
+    while (true) {
+      if (connectAnimated(wifiSSID, wifiPASS, 15000)) goto ntpScreen;
+      int ch = askRetryForgetExit();
+      if (ch == 1) {           // RE-ENTER
+        inputPassword(wifiPASS, 64);
+        if (strlen(wifiPASS) == 0) { WiFi.mode(WIFI_OFF); return; }
+        saveWifi();
+        continue;
+      }
+      if (ch == 2) { showWrongPassword(wifiSSID); break; }   // FORGET
+      if (ch == 3) break;                                    // EXIT
+    }
     WiFi.mode(WIFI_OFF);
     return;
   }
@@ -604,8 +669,13 @@ void appNet() {
       bool conn = connectAnimated(wifiSSID, wifiPASS, 15000);
       while (!conn) {
         int ch = askRetryForgetExit();
-        if (ch == 2) { WiFi.mode(WIFI_OFF); return; }
-        if (ch == 1) { showWrongPassword(wifiSSID); WiFi.mode(WIFI_OFF); return; }
+        if (ch == 3) { WiFi.mode(WIFI_OFF); return; }
+        if (ch == 2) { showWrongPassword(wifiSSID); WiFi.mode(WIFI_OFF); return; }
+        if (ch == 1) {                                   // RE-ENTER
+          inputPassword(wifiPASS, 64);
+          if (strlen(wifiPASS) == 0) { WiFi.mode(WIFI_OFF); return; }
+          saveWifi();
+        }
         conn = connectAnimated(wifiSSID, wifiPASS, 15000);
       }
     } else { WiFi.mode(WIFI_OFF); return; }
@@ -1948,24 +2018,66 @@ void appStore() {
             String url = String(XLA_APPBASE) + files[rsel] + ".xla";
             d.clearDisplay(); headerBar("DOWNLOAD");
             d.setTextColor(1); d.setTextSize(1);
-            d.setCursor(4, 24); d.print(files[rsel]);
-            d.setCursor(4, 36); d.print("downloading...");
+            d.setCursor(4, 22); d.print(files[rsel]);
+            d.setCursor(4, 34); d.print("connecting...");
             d.display();
-            if (http.begin(cl, url) && http.GET() == 200) {
-              String payload = http.getString();
-              http.end();
-              String path = "/p/" + files[rsel] + ".xla";
-              File fo = SPIFFS.open(path, "w");
-              if (fo) { fo.print(payload); fo.close();
-                Serial.printf("[store] downloaded %s (%u b)\n", files[rsel].c_str(), (unsigned)payload.length());
-                nApps = xlaListInstalled(names, 8);
-                beep(1600, 60);
+            // WiFi ВЫКЛЮЧЕН после манифеста — включаем снова для загрузки
+            WiFi.mode(WIFI_STA);
+            bool wok = (WiFi.status() == WL_CONNECTED) || connectAnimated(wifiSSID, wifiPASS);
+            bool dlok = false;
+            if (wok) {
+              WiFiClientSecure cl2;
+              cl2.setInsecure();
+              HTTPClient http2;
+              int code = -1;
+              if (http2.begin(cl2, url)) code = http2.GET();
+              Serial.printf("[store] GET %s -> %d\n", url.c_str(), code);
+              if (code == 200) {
+                int total = http2.getSize();
+                Serial.printf("[store] size=%d\n", total);
+                WiFiClient* st = http2.getStreamPtr();
+                String path = "/p/" + files[rsel] + ".xla";
+                File fo = SPIFFS.open(path, "w");
+                if (fo) {
+                  uint8_t buf[512];
+                  int got = 0, wr = 0;
+                  uint32_t tLast = millis();
+                  while (got < total && millis() - tLast < 15000) {
+                    size_t avail = st->available();
+                    if (avail) {
+                      int nrd = st->readBytes(buf, min((size_t)512, avail));
+                      if ((int)fo.write(buf, nrd) != nrd) { Serial.println("[store] write fail"); break; }
+                      got += nrd; wr += nrd; tLast = millis();
+                      if (total > 0) {
+                        int pct = got * 100 / total;
+                        d.fillRect(4, 44, 60, 8, 0);
+                        d.drawRect(4, 44, 60, 8, 1);
+                        d.fillRect(6, 46, 56 * pct / 100, 4, 1);
+                        d.setCursor(70, 44); d.printf("%d%%", pct);
+                        d.display();
+                      }
+                    } else delay(5);
+                  }
+                  fo.close();
+                  dlok = (got == total);
+                  Serial.printf("[store] downloaded %s (%d/%d b)\n", files[rsel].c_str(), got, total);
+                } else Serial.println("[store] SPIFFS open fail");
               }
+              http2.end();
+            } else Serial.println("[store] wifi re-connect fail");
+            WiFi.mode(WIFI_OFF);
+            if (dlok) {
+              nApps = xlaListInstalled(names, 8);
+              beep(1600, 60);
+              d.clearDisplay(); headerBar("STORE");
+              d.setTextColor(1); d.setTextSize(1);
+              d.setCursor(4, 26); d.print("installed!");
+              d.display(); delay(700);
             } else {
-              http.end();
               d.clearDisplay(); headerBar("STORE");
               d.setTextColor(1); d.setTextSize(1);
               d.setCursor(4, 26); d.print("download failed");
+              d.setCursor(4, 38); d.print("see serial log");
               d.display(); delay(1200);
             }
             break;
