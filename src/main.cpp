@@ -142,12 +142,55 @@ void setup() {
   beep(1600, 80);
 
   SPIFFS.begin(true);   // /t.xla — временный файл (удаляется после запуска)
+  SPIFFS.remove("/t.xla");   // чистка хвоста от сброса посреди игры (файл мог остаться)
 
   // ---- душа v0.13: boot-синхронизация ----
   bootCloudSync();
 }
 
 void loop() {
+  // ---------- USB-консоль отладки (для тестов без стика) ----------
+  // ls          — катал óблака
+  // run N       — запуск облачной игры №N (download->run->delete)
+  // sys N       — запуск локального приложения №N
+  // menu        — в меню (как клик OK)
+  // resync      — каталог+NTP
+  while (Serial.available()) {
+    static char cmdbuf[48];
+    static int cmdlen = 0;
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      cmdbuf[cmdlen] = 0;
+      if (cmdlen) {
+        Serial.printf("[dbg] >%s<\n", cmdbuf);
+        if (!strncmp(cmdbuf, "ls", 2)) {
+          Serial.printf("[dbg] catalog %d apps:\n", cloudCount());
+          for (int i = 0; i < cloudCount(); i++)
+            Serial.printf("[dbg]   %d: %s (%s) %s\n", i, cloudTitle(i), cloudCat(i), cloudFile(i));
+        } else if (!strncmp(cmdbuf, "run ", 4)) {
+          int n = atoi(cmdbuf + 4);
+          Serial.printf("[dbg] running cloud app %d...\n", n);
+          bool ok = cloudRunApp(n);
+          Serial.printf("[dbg] app %d done ok=%d\n", n, (int)ok);
+        } else if (!strncmp(cmdbuf, "sys ", 4)) {
+          int n = atoi(cmdbuf + 4);
+          const AppDef* a = appGet(n);
+          Serial.printf("[dbg] sys app %d: %s\n", n, a ? a->name : "?");
+          if (a && a->fn) { a->fn(); Serial.printf("[dbg] sys %d done\n", n); }
+        } else if (!strncmp(cmdbuf, "resync", 6)) {
+          Serial.println("[dbg] resync...");
+          cloudEnsureWifi(false);
+          cloudFetchCatalog(false);
+          cloudSyncTime(false);
+          Serial.printf("[dbg] resync done: %d apps\n", cloudCount());
+        }
+        cmdlen = 0;
+      }
+    } else if (cmdlen < (int)sizeof(cmdbuf) - 1) {
+      cmdbuf[cmdlen++] = c;
+    }
+  }
+
   Ev e = pollEvent();
   bgSongTick();
   static uint32_t lastClock = 0xFFFFFFFF;
