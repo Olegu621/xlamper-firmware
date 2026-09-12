@@ -1,9 +1,14 @@
 """gen_opcodes.py — генератор таблицы опкодов из ЕДИНОГО источника правды:
-xlamper_v012/src/xla_opcodes.h (X-макро-таблица).
+заголовок прошивки xla_opcodes.h (X-макро-таблица).
 
 Все инструменты (xlas.py, xla_disasm.py, симулятор) импортируют таблицу
 ОТСЮДА. Рассинхрон «VM знает одно — ассемблер другое» (баг v0.11 с
 GCPY/HTTP/DELAY) становится структурно невозможным: одна таблица.
+
+Поиск заголовка (первый найденный):
+    1. env XLA_OPS_HEADER — явный путь
+    2. ./xla_opcodes.h    — копия рядом с инструментами (самодостаточный репо)
+    3. ../src/xla_opcodes.h — если инструменты лежат в прошивке
 
 Выход:
     OPS        — {mnemonic: opcode}
@@ -11,10 +16,33 @@ GCPY/HTTP/DELAY) становится структурно невозможны�
     NAMES      — {opcode: mnemonic}
 """
 
+import os
 import re
 from pathlib import Path
 
-HEADER = Path(__file__).resolve().parent.parent / "src" / "xla_opcodes.h"
+_HERE = Path(__file__).resolve().parent
+
+
+def _find_header() -> Path:
+    """Найти xla_opcodes.h: env -> рядом -> ../src (прошивка)."""
+    env = os.environ.get("XLA_OPS_HEADER")
+    if env:
+        p = Path(env)
+        if p.exists():
+            return p
+    local = _HERE / "xla_opcodes.h"
+    if local.exists():
+        return local
+    fw = _HERE.parent / "src" / "xla_opcodes.h"
+    if fw.exists():
+        return fw
+    raise FileNotFoundError(
+        "xla_opcodes.h не найден: положи копию рядом с tools/, "
+        "укажи XLA_OPS_HEADER или запускай из репо прошивки"
+    )
+
+
+HEADER = _find_header()
 
 _LINE = re.compile(
     r"^\s*X\(\s*(0x[0-9A-Fa-f]{2})\s*,\s*([A-Z][A-Z0-9_]*)\s*,\s*(NONE|IMM16|STR16)\s*\)",
