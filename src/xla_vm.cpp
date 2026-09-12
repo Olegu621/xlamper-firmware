@@ -114,6 +114,10 @@ static int16_t httpFetch(const char* url) {
 // ---------- шаг VM ----------
 enum Xr : uint8_t { XR_NONE = 0, XR_FRAME, XR_HALT, XR_EXIT };
 
+// инъекция стика из USB-консоли: опкод 0x82 читает dbgStick, пока != -2 (выкл)
+static int8_t dbgStick = -2;
+void xlaDbgStick(int8_t s) { dbgStick = s; }
+
 static Xr xStep() {
   uint32_t budget = xOpBudget;
   while (budget--) {
@@ -235,7 +239,7 @@ static Xr xStep() {
       // -- ввод --
       case 0x80: xPush((int16_t)readX()); break;
       case 0x81: xPush((int16_t)readY()); break;
-      case 0x82: xPush(stick8()); break;
+      case 0x82: xPush(dbgStick == -2 ? stick8() : dbgStick); break;   // инъекция стика по USB
       case 0x83: xPush((int16_t)xEv); break;
       case 0x84: xPush((int16_t)holdProgress()); break;
       // -- математика --
@@ -288,6 +292,23 @@ bool xlaLoadBuf(const uint8_t* buf, size_t len) {
   return true;
 }
 
+// ---------- USB-инъекция ввода (отладочная консоль) ----------
+// Очередь событий + инъекция стика из Serial: игра по кабелю без железа-ввода.
+// evTake() вытягивает из очереди до pollEvent(); 0x82 читает dbgStick,
+// пока он != -2 (выкл).
+static Ev evQ[16];
+static int evQHead = 0, evQTail = 0;
+
+void xlaDbgEvent(Ev e) {
+  int next = (evQTail + 1) % 16;
+  if (next != evQHead) { evQ[evQTail] = e; evQTail = next; }
+}
+static Ev evTake() {
+  if (evQHead == evQTail) return EV_NONE;
+  Ev e = evQ[evQHead];
+  evQHead = (evQHead + 1) % 16;
+  return e;
+}
 void xlaFree() {
   if (xCode) free(xCode);
   if (xData) free(xData);
@@ -305,7 +326,27 @@ bool xlaRun() {
   d.clearDisplay();
   uint32_t lastFrame = 0;
   while (xRunning) {
-    Ev e = pollEvent();
+    // USB-консоль: ev N (событие), stick N (-1 покой), q — выход из игры
+    while (Serial.available()) {
+      static char dbgl[12];
+      static int dbgn = 0;
+      char c = Serial.read();
+      if (c == '\n' || c == '\r') {
+        dbgl[dbgn] = 0;
+        if (dbgl[0] == 'q' && dbgn == 1) { xRunning = false; Serial.println("[xla] usb quit"); }
+        else if (!strncmp(dbgl, "ev ", 3) && dbgn >= 3) {
+          int v = atoi(dbgl + 3);
+          if (v >= 1 && v <= 6) { xlaDbgEvent((Ev)v); Serial.printf("[xla] ev %d queued\n", v); }
+        } else if (!strncmp(dbgl, "stick ", 6) && dbgn >= 6) {
+          int v = atoi(dbgl + 6);
+          xlaDbgStick((int8_t)v);
+          Serial.printf("[xla] stick %d\n", v);
+        }
+        dbgn = 0;
+      } else if (dbgn < (int)sizeof(dbgl) - 1) dbgl[dbgn++] = c;
+    }
+    Ev e = evTake();
+    if (e == EV_NONE) e = pollEvent();
     if (e == EV_EXIT) break;
     xEv = e;
     Xr r = xStep();

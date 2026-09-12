@@ -4,6 +4,7 @@
 // ==================================================================
 #include <Arduino.h>
 #include <FS.h>
+#include "input.h"   // Ev
 
 // Загрузка образа из RAM (проверка заголовка + лимитов). true = образ в VM.
 bool xlaLoadBuf(const uint8_t* buf, size_t len);
@@ -13,6 +14,12 @@ void xlaFree();
 
 // Запуск загруженного образа до EXIT/HALT/ошибки. Показывает экран ошибки.
 bool xlaRun();
+
+// Отладочная инъекция ввода по USB (консоль во время игры):
+// xlaDbgEvent — поставить событие в очередь VM (1..6);
+// xlaDbgStick — подсунуть значение стика (-2 = выкл, реальный стик).
+void xlaDbgEvent(Ev e);
+void xlaDbgStick(int8_t s);
 
 // Загрузить .xla из SPIFFS и запустить; освобождает образ после.
 bool xlaRunFile(const char* path);

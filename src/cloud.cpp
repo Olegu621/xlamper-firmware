@@ -100,9 +100,15 @@ bool cloudFetchCatalog(bool showScreen) {
       int b1 = line.indexOf('|');
       int b2 = line.indexOf('|', b1 + 1);
       if (b1 > 0 && b2 > b1) {
-        snprintf(catalog[n].file, sizeof catalog[n].file, "%s", line.substring(0, b1).c_str());
-        snprintf(catalog[n].title, sizeof catalog[n].title, "%s", line.substring(b1 + 1, b2).c_str());
-        snprintf(catalog[n].cat, sizeof catalog[n].cat, "%s", line.substring(b2 + 1).c_str());
+        // размеры полей структуры: file[16] title[16] cat[10];
+        // категории длиннее 9 симв. не бывает, но GCC-предупреждение
+        // о возможной обрезке гасим явным ограничением длины:
+        String f = line.substring(0, b1);   f.remove(15);
+        String t = line.substring(b1 + 1, b2); t.remove(15);
+        String c = line.substring(b2 + 1);  c.remove(9);
+        snprintf(catalog[n].file,  sizeof catalog[n].file,  "%.15s", f.c_str());
+        snprintf(catalog[n].title, sizeof catalog[n].title, "%.15s", t.c_str());
+        snprintf(catalog[n].cat,   sizeof catalog[n].cat,   "%.9s",  c.c_str());
         n++;
       }
     }
