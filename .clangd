@@ -1,15 +1,16 @@
 CompileFlags:
   # GCC-специфичные флаги ESP32-тулчейна, которые clangd не понимает
   Remove: [-fstrict-volatile-bitfields, -fno-tree-switch-conversion, -march=*, -mno-relax, -mabi=*]
-  # путь к локальным заголовкам + НЕЯВНЫЕ пути stdlib riscv32-тулчейна
-  # (clangd, в отличие от gcc, не умеет искать их сам: отсюда 'algorithm not found')
+  # stdlib заголовки riscv32-тулчейна: clangd (в отличие от gcc) не умеет искать их сам,
+  # отсюда каскады 'algorithm not found'. Пути — СТАНДАРТНЫЕ для PlatformIO
+  # (замени USERNAME на свой, если Linux/macOS: ~/.platformio/...):
   Add:
     - -Isrc
     - -isystem
-    - C:/Users/clash/.platformio/packages/toolchain-riscv32-esp/riscv32-esp-elf/include/c++/14.2.0
+    - C:/Users/USERNAME/.platformio/packages/toolchain-riscv32-esp/riscv32-esp-elf/include/c++/14.2.0
     - -isystem
-    - C:/Users/clash/.platformio/packages/toolchain-riscv32-esp/riscv32-esp-elf/include/c++/14.2.0/riscv32-esp-elf
+    - C:/Users/USERNAME/.platformio/packages/toolchain-riscv32-esp/riscv32-esp-elf/include/c++/14.2.0/riscv32-esp-elf
     - -isystem
-    - C:/Users/clash/.platformio/packages/toolchain-riscv32-esp/lib/gcc/riscv32-esp-elf/14.2.0/include
+    - C:/Users/USERNAME/.platformio/packages/toolchain-riscv32-esp/lib/gcc/riscv32-esp-elf/14.2.0/include
     - -isystem
-    - C:/Users/clash/.platformio/packages/toolchain-riscv32-esp/riscv32-esp-elf/include
+    - C:/Users/USERNAME/.platformio/packages/toolchain-riscv32-esp/riscv32-esp-elf/include
