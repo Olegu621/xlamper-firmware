@@ -74,8 +74,8 @@ static void drawFrame(int sec, const SecList& L, int s) {
   char sh[20];
   snprintf(sh, sizeof sh, "< %s >", CATS[sec]);
   d.setCursor(2, 1); d.print(sh);
-  // счётчик «sel+1 / n» — понятнее голого числа
-  char cnt[10]; snprintf(cnt, sizeof cnt, "%d/%d", s + 1, L.n);
+  // счётчик «sel+1 / n»: индексы листа < 100 и n < 100 -> ограничиваем точность
+  char cnt[10]; snprintf(cnt, sizeof cnt, "%d/%d", (s + 1) % 100, L.n % 100);
   d.setCursor(W - 7 * strlen(cnt) - 2, 1); d.print(cnt);
 
   if (sec != SEC_SYS && !cloudCatalogOk()) {
@@ -168,7 +168,6 @@ bool menuRun(MenuPick* out) {
     if (e == EV_OK && L.n > 0) {
       beep(1500, 40);
       int pickIdx = L.idx[sel[curSec]];
-      int sec = curSec;   // для колбэка
       // ctx = {sec, pick} — динамический блок (стек меню)
       struct PickCtx { int sec, pick; } ctx = { curSec, pickIdx };
       uiTransition(LaunchStyle::ZOOM, [](void* c) {

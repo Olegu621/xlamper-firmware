@@ -11,6 +11,7 @@
 #include "sound.h"
 #include "net.h"        // netOnline, wifiConnectAnimated, ntpTime/ntpGotAt
 #include "xla_vm.h"
+#include "xlbasic.h"    // BASIC-игры (.xlb) — текст без ассемблера
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -74,17 +75,27 @@ static void statusScreen(const char* line1, const char* line2, const char* line3
   d.display();
 }
 
+// ---------- http-помощник: plain или TLS по схеме URL ----------
+// LAN-сервер (self-hosting) — http://, GitHub — https://.
+static bool httpBegin(HTTPClient& http, const char* url) {
+  if (strncmp(url, "https:", 6) == 0) {
+    static WiFiClientSecure tls;
+    tls.setInsecure();
+    return http.begin(tls, url);
+  }
+  static WiFiClient plain;
+  return http.begin(plain, url);
+}
+
 // ---------- загрузка манифеста ----------
 bool cloudFetchCatalog(bool showScreen) {
   if (!netOnline()) {
     if (showScreen) statusScreen("offline: no wifi", "apps list kept", nullptr);
     return catalogOk;   // старый каталог остаётся
   }
-  WiFiClientSecure cl;
-  cl.setInsecure();
   HTTPClient http;
   if (showScreen) statusScreen("syncing catalog...", nullptr, nullptr);
-  if (!(http.begin(cl, XLA_MANIFEST) && http.GET() == 200)) {
+  if (!(httpBegin(http, XLA_MANIFEST) && http.GET() == 200)) {
     http.end();
     if (showScreen) statusScreen("catalog unreachable", "kept previous", nullptr);
     return catalogOk;
@@ -185,16 +196,27 @@ bool cloudRunApp(int idx) {
     return false;
   }
 
-  // 2) download в /t.xla (один файл — потом удаляем)
+  // 2) download во временный файл (потом удаляем).
+  // Расширение: .xla (байт-код) или .xlb (BASIC-текст) — по наличию
+  // BASIC-версии в облаке (apps/<file>.xlb) предпочитаем её: читаемый
+  // исходник для всех, ноль инструментов.
   char url[128];
-  snprintf(url, sizeof url, "%s%s.xla", XLA_APPBASE, catalog[idx].file);
+  snprintf(url, sizeof url, "%s%s.xlb", XLA_APPBASE, catalog[idx].file);
   statusScreen(l1, "downloading...", nullptr);
   Serial.printf("[cloud] GET %s\n", url);
-  WiFiClientSecure cl;
-  cl.setInsecure();
   HTTPClient http;
-  if (!http.begin(cl, url)) { statusScreen(l1, "url fail", nullptr); return false; }
+  if (!httpBegin(http, url)) { statusScreen(l1, "url fail", nullptr); return false; }
   int code = http.GET();
+  const char* tmpPath = "/t.xlb";
+  if (code != 200) {
+    // нет .xlb — обычный байт-код
+    http.end();
+    snprintf(url, sizeof url, "%s%s.xla", XLA_APPBASE, catalog[idx].file);
+    Serial.printf("[cloud] GET %s\n", url);
+    if (!httpBegin(http, url)) { statusScreen(l1, "url fail", nullptr); return false; }
+    code = http.GET();
+    tmpPath = "/t.xla";
+  }
   if (code != 200) {
     http.end();
     Serial.printf("[cloud] HTTP %d\n", code);
@@ -209,7 +231,7 @@ bool cloudRunApp(int idx) {
     statusScreen(l1, "bad size", nullptr);
     return false;
   }
-  File f = SPIFFS.open("/t.xla", "w");
+  File f = SPIFFS.open(tmpPath, "w");
   if (!f) { http.end(); statusScreen(l1, "fs fail", nullptr); return false; }
   WiFiClient* st = http.getStreamPtr();
   uint8_t buf[512];
@@ -231,20 +253,22 @@ bool cloudRunApp(int idx) {
   }
   f.close();
   http.end();
-  Serial.printf("[cloud] downloaded %d/%d\n", got, total);
+  Serial.printf("[cloud] downloaded %d/%d -> %s\n", got, total, tmpPath);
   if (got != total) {
-    SPIFFS.remove("/t.xla");
+    SPIFFS.remove(tmpPath);
     statusScreen(l1, "download failed", nullptr);
     beepWait(250, 300); delay(900);
     return false;
   }
 
-  // 3) run
+  // 3) run: BASIC (.xlb) или байт-код (.xla) — по факту скачанного
   beep(1500, 40);
-  bool ok = xlaRunFile("/t.xla");
+  bool ok;
+  if (strcmp(tmpPath, "/t.xlb") == 0) ok = xlbRunFile("/t.xlb");
+  else ok = xlaRunFile("/t.xla");
 
   // 4) delete — ничего не храним (бесконечное облако = нулевой кэш)
-  SPIFFS.remove("/t.xla");
+  SPIFFS.remove(tmpPath);
   Serial.printf("[cloud] ran %s ok=%d, temp removed\n", catalog[idx].file, ok);
   return ok;
 }
