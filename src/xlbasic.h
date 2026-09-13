@@ -9,7 +9,7 @@
 
 // лимиты (int16-мир консоли)
 constexpr int XLB_MAXLINES    = 512;    // строк программы
-constexpr int XLB_MAXLINELEN  = 60;     // символов на строку
+constexpr int XLB_MAXLINELEN  = 96;     // символов на строку
 constexpr int XLB_MAXSRC      = 32768;  // байт исходника
 constexpr int XLB_MAXSTEPS    = 200000; // защита от зависания (без WAIT)
 constexpr int XLB_TITLELEN    = 12;

@@ -234,9 +234,17 @@ static char gLabel[16];
 static int16_t curEvent = 0;
 static bool gotEnd = false;
 static bool waited = false;      // WAIT в этом кадре — сброс сторожа
+static int16_t retStack[8];      // стек GOSUB (глубина 8 — вложенные отрисовки)
+static int retSP = 0;
 
 static int execLine(const char* s, int lineNo) {
-  const char* p = s;
+  // инлайн-комментарий: обрезать с апострофа (текст в кавычках обрабатывается
+  // ДО — TEXT выделяет свою строку первым, а апостроф внутри "..." у нас не используется)
+  char buf[XLB_MAXLINELEN + 1];
+  strncpy(buf, s, XLB_MAXLINELEN); buf[XLB_MAXLINELEN] = 0;
+  char* cut = strchr(buf, '\'');
+  if (cut) *cut = 0;
+  const char* p = buf;
   skipWs(p);
   if (!*p || *p == '\'') return 0;
   if (kwIs(p, "REM")) return 0;
@@ -247,6 +255,7 @@ static int execLine(const char* s, int lineNo) {
 
   if (kwIs(p, "BEEP")) {
     int16_t f = evalExpr(p); skipWs(p);
+    if (*p == ',') { p++; skipWs(p); }     // разделитель параметров
     int16_t ms = evalExpr(p);
     if (!evErr) beep(f, ms);
     return evErr ? 3 : 0;
@@ -399,11 +408,16 @@ not_circ:
     char nm[16];
     if (readName(p, nm, 16) == 0) return 3;
     strcpy(gLabel, nm);
-    if (isSub) vars[VRET] = (int16_t)lineNo;   // RETURN вернётся на lineNo+1
+    if (isSub) {                                // стек возвратов (глубина 8)
+      if (retSP >= 8) return 3;
+      retStack[retSP++] = (int16_t)lineNo;
+    }
     return 2;
   }
   if (kwIs(p, "RETURN")) {
-    gLabel[0] = 1; gLabel[1] = 0;             // маркер возврата
+    if (retSP <= 0) { Serial.println("[xlb] RETURN без GOSUB"); return 3; }
+    retSP--;
+    gLabel[0] = 1; gLabel[1] = 0;             // маркер: возврат из стека
     return 2;
   }
   if (kwIs(p, "IF")) {
@@ -436,6 +450,7 @@ bool xlbRun() {
   running = true;
   gotEnd = false;
   curEvent = 0;
+  retSP = 0;
   memset(vars, 0, sizeof vars);
   int pc = 0;
   uint32_t steps = 0;
@@ -458,7 +473,7 @@ bool xlbRun() {
       break;
     }
     if (r == 2) {
-      if (gLabel[0] == 1) pc = vars[VRET] + 1; // RETURN
+      if (gLabel[0] == 1) pc = retStack[retSP] + 1;   // RETURN: строка после GOSUB
       else {
         int t = findLabel(gLabel);
         if (t < 0) { Serial.printf("[xlb] метка нет: %s\n", gLabel); break; }

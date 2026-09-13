@@ -3,6 +3,7 @@
 Отладка .xlb-игр без железа: события скриптуются, canvas — ASCII.
 См. xlbasic.cpp (истина — там; здесь зеркальная семантика для QA).
 """
+
 from __future__ import annotations
 
 import sys
@@ -60,7 +61,10 @@ class Canvas:
     def show(self) -> str:
         out = []
         for y in range(0, H, 2):
-            row = "".join("#" if any(self.px[y + k][x] for k in (0, 1) if y + k < H) else " " for x in range(W))
+            row = "".join(
+                "#" if any(self.px[y + k][x] for k in (0, 1) if y + k < H) else " "
+                for x in range(W)
+            )
             out.append(row)
         return "\n".join(out)
 
@@ -99,7 +103,8 @@ class XlbSim:
 
             m = re.match(r"^([A-Za-z]+):\s*(.*)$", ln)
             if m and m.group(1).upper() not in (
-                "IF", "TITLE",
+                "IF",
+                "TITLE",
             ):
                 self.labels[m.group(1).upper()] = len(body)
                 ln = m.group(2)
@@ -128,31 +133,36 @@ class XlbSim:
         import re
 
         s = expr.strip()
-        # сравнения
+        # сравнения (двухсимвольные первыми — парные!)
         for op, fn in (
             ("==", lambda a, b: a == b),
             ("!=", lambda a, b: a != b),
             ("<=", lambda a, b: a <= b),
             (">=", lambda a, b: a >= b),
+            ("<", lambda a, b: a < b),
+            (">", lambda a, b: a > b),
         ):
             i = self._find_top(s, op)
             if i >= 0:
-                return 1 if fn(self._eval(s[:i], line_no), self._eval(s[i + len(op):], line_no)) else 0
-        for op, fn in (("<", lambda a, b: a < b), (">", lambda a, b: a > b)):
-            i = self._find_top(s, op)
-            if i >= 0:
-                return 1 if fn(self._eval(s[:i], line_no), self._eval(s[i + 1:], line_no)) else 0
+                return (
+                    1
+                    if fn(
+                        self._eval(s[:i], line_no),
+                        self._eval(s[i + len(op) :], line_no),
+                    )
+                    else 0
+                )
         # сложение/вычитание
-        i = self._find_top(s, "+-")
+        i = self._find_top(s, "+|-")
         if i > 0:
             a = self._eval(s[:i], line_no)
-            b = self._eval(s[i + 1:], line_no)
+            b = self._eval(s[i + 1 :], line_no)
             return a + b if s[i] == "+" else a - b
         # умножение/деление
-        i = self._find_top(s, "*/%")
+        i = self._find_top(s, "*|/|%")
         if i > 0:
             a = self._eval(s[:i], line_no)
-            b = self._eval(s[i + 1:], line_no)
+            b = self._eval(s[i + 1 :], line_no)
             if s[i] == "*":
                 return a * b
             if b == 0:
@@ -168,7 +178,10 @@ class XlbSim:
                 return self._eval(inner, line_no)
         # число
         if re.fullmatch(r"\d+", s):
-            v = int(s)
+            try:
+                v = int(s)
+            except ValueError:  # недостижимо после fullmatch, но парсим в одном месте
+                raise self._err(line_no, f"syntax: {s!r}") from None
             if v > 32767:
                 raise self._err(line_no, "int16 ovf")
             return v
@@ -183,7 +196,10 @@ class XlbSim:
 
     def _find_top(self, s: str, ops: str) -> int:
         """Индекс оператора вне скобок; -1 если нет.
-        Скан С НАЧАЛА: для '==' нужен ПЕРВЫЙ '=' (иначе срез ломается)."""
+        ops — набор ОПЕРАТОРОВ через |: '==' значит пару, '+-' любой из них.
+        Двухсимвольные операторы матчатся ЦЕЛИКОМ (нужен ОПЕРАТОР, не его символ)."""
+        two = [o for o in ops.split("|") if len(o) == 2]
+        one = [o for o in ops.split("|") if len(o) == 1]
         depth = 0
         i = 0
         while i < len(s):
@@ -192,15 +208,20 @@ class XlbSim:
                 depth += 1
             elif c == ")":
                 depth -= 1
-            elif depth == 0 and c in ops:
-                # не унарный минус: перед ним оператор/скобка/начало
-                if c == "-" and (i == 0 or s[i - 1] in "+-*/%(<>=! "):
-                    i += 1
-                    continue
-                # для двухсимвольных (==, !=, <=, >=) начинаем на первом символе
-                if i > 0 and s[i - 1] in "=!<>" and s[i - 2 if i >= 2 else 0:i] not in ("", ):
-                    pass
-                return i
+            elif depth == 0:
+                matched_len = 0
+                for t in two:
+                    if s.startswith(t, i):
+                        matched_len = 2
+                        break
+                if not matched_len and c in one:
+                    # унарный минус
+                    if c == "-" and (i == 0 or s[i - 1] in "+-*/%(<>=! "):
+                        i += 1
+                        continue
+                    matched_len = 1
+                if matched_len:
+                    return i
             i += 1
         return -1
 
@@ -226,16 +247,19 @@ class XlbSim:
         self.cur_event = event
         steps = 0
         pc = getattr(self, "_pc", 0)
-        ret = None  # GOSUB-возврат
+        if not hasattr(self, "_ret"):
+            self._ret = []  # стек GOSUB (глубина 8)
         while steps < max_steps:
             steps += 1
             if pc >= len(self.lines):
                 return "end"
             ln = self.lines[pc]
             pc += 1
-            if not ln:
+            if "'" in ln:
+                ln = ln[: ln.index("'")]
+            if not ln.strip():
                 continue
-            r, pc, ret = self._exec(ln, pc, ret, pc)
+            r, pc = self._exec(ln, pc, None, pc)
             if r == "wait":
                 self._pc = pc
                 self.frames += 1
@@ -252,30 +276,30 @@ class XlbSim:
 
         u = ln.upper()
         if u.startswith("END"):
-            return "end", pc, ret
+            return "end", pc
         if u.startswith("CLS"):
             self.cv = Canvas()
-            return "ok", pc, ret
+            return "ok", pc
         if u.startswith("DISP"):
-            return "disp", pc, ret  # не кадр; шаг
+            return "disp", pc  # не кадр; шаг
         if u.startswith("BEEP "):
-            m = re.match(r"BEEP\s+(.+?)\s+(.+)$", ln, re.I)
+            m = re.match(r"BEEP\s+(.+?)\s*,\s*(.+)$", ln, re.I)
             if not m:
                 raise self._err(line_no, "BEEP f ms")
             f = self._eval(m.group(1), line_no)
             ms = self._eval(m.group(2), line_no)
             self.beeps.append((f, ms))
-            return "ok", pc, ret
+            return "ok", pc
         if u.startswith("WAIT"):
-            return "wait", pc, ret
+            return "wait", pc
         if u.startswith("TEXT "):
             m = re.match(r'TEXT\s+(\S+)\s+(\S+)\s+"(.*)"', ln, re.I)
             if not m:
-                raise self._err(line_no, "TEXT x y \"текст\"")
+                raise self._err(line_no, 'TEXT x y "текст"')
             # в симе текст не рисуем (ASCII-канва), но валидируем координаты
             self._eval(m.group(1), line_no)
             self._eval(m.group(2), line_no)
-            return "ok", pc, ret
+            return "ok", pc
         if u.startswith("NUM "):
             m = re.match(r"NUM\s+(\S+)\s+(\S+)\s+(.+)$", ln, re.I)
             if not m:
@@ -283,10 +307,11 @@ class XlbSim:
             self._eval(m.group(1), line_no)
             self._eval(m.group(2), line_no)
             self._eval(m.group(3), line_no)
-            return "ok", pc, ret
+            return "ok", pc
         if u.startswith(("PSET ", "LINE ", "RECT ", "FRECT ", "CIRC ", "FCIRC ")):
-            import re as _re
-            mm = _re.match(r"([A-Z]+)\s+(.+)$", u)
+            mm = re.match(r"([A-Z]+)\s+(.+)$", u)
+            if mm is None:
+                raise self._err(line_no, f"графика: {ln[:20]!r}")
             parts = mm.group(2).split()
             vals = [self._eval(v, line_no) for v in parts]
             if u.startswith("PSET"):
@@ -294,20 +319,20 @@ class XlbSim:
             elif u.startswith("LINE"):
                 self.cv.line(*vals[:5])
             elif u.startswith("RECT"):
-                self.cv.rect(*vals[:5])
+                self.cv.rect(vals[0], vals[1], vals[2], vals[3], vals[4], fill=False)
             elif u.startswith("FRECT"):
                 self.cv.rect(vals[0], vals[1], vals[2], vals[3], vals[4], fill=True)
             elif u.startswith("CIRC"):
                 self.cv.circ(vals[0], vals[1], vals[2], vals[3])
             elif u.startswith("FCIRC"):
                 self.cv.circ(vals[0], vals[1], vals[2], vals[3], fill=True)
-            return "ok", pc, ret
+            return "ok", pc
         if u.startswith("STICK"):
             m = re.match(r"STICK\s*->\s*([A-Za-z]{1,2})", ln, re.I)
             if not m:
                 raise self._err(line_no, "STICK -> V")
             self.vars[self._var_index(m.group(1))] = -1  # сим: покой
-            return "ok", pc, ret
+            return "ok", pc
         if u.startswith(("KEY", "EVENT")):
             m = re.match(r"(?:KEY|EVENT)\s*->\s*([A-Za-z]{1,2})", ln, re.I)
             if not m:
@@ -315,41 +340,43 @@ class XlbSim:
             idx = self._var_index(m.group(1))
             self.vars[idx] = self.cur_event
             self.cur_event = 0
-            return "ok", pc, ret
+            return "ok", pc
         m = re.match(r"RND\s+(.+?)\s*->\s*([A-Za-z]{1,2})", ln, re.I)
         if m:
             n = self._eval(m.group(1), line_no)
             self.vars[self._var_index(m.group(2))] = self._rand(n) if n > 0 else 0
-            return "ok", pc, ret
+            return "ok", pc
         m = re.match(r"SCORE\s+(\S+)\s*->\s*([A-Za-z]{1,2})", ln, re.I)
         if m:
             key = f"{self.title}_{m.group(1)}"
             self.vars[self._var_index(m.group(2))] = self.nvs.get(key, 0)
-            return "ok", pc, ret
+            return "ok", pc
         m = re.match(r"SCORE\s+(\S+)\s+(.+)$", ln, re.I)
         if m:
             v = self._eval(m.group(2), line_no)
             self.nvs[f"{self.title}_{m.group(1)}"] = v
-            return "ok", pc, ret
+            return "ok", pc
         m = re.match(r"(GOTO|GOSUB)\s+([A-Za-z]+)", ln, re.I)
         if m:
             tgt = m.group(2).upper()
             if tgt not in self.labels:
                 raise self._err(line_no, f"нет метки {tgt}")
             if m.group(1).upper() == "GOSUB":
-                ret = pc
-            return "ok", self.labels[tgt], ret
+                if len(self._ret) >= 8:
+                    raise self._err(line_no, "GOSUB глубина > 8")
+                self._ret.append(line_no)  # возврат: строка после GOSUB
+            return "ok", self.labels[tgt]
         if u.startswith("RETURN"):
-            if ret is None:
+            if not self._ret:
                 raise self._err(line_no, "RETURN без GOSUB")
-            return "ok", ret, None
+            return "ok", self._ret.pop()   # GOSUB уже пушил индекс СЛЕДУЮЩЕЙ строки
         # IF cond THEN cmd
         m = re.match(r"IF\s+(.+?)\s+THEN\s+(.+)$", ln, re.I)
         if m:
             if self._eval(m.group(1), line_no):
-                r, pc2, ret2 = self._exec(m.group(2), pc, ret, line_no)
-                return r, pc2, ret2   # переходы (GOTO/GOSUB/RETURN) сквозь!
-            return "ok", pc, ret
+                r, pc2 = self._exec(m.group(2), pc, None, line_no)
+                return r, pc2  # переходы (GOTO/GOSUB/RETURN) сквозь!
+            return "ok", pc
         # присваивание [LET] V = expr
         m = re.match(r"(?:LET\s+)?([A-Za-z]{1,2})\s*=\s*(.+)$", ln)
         if m:
@@ -360,7 +387,7 @@ class XlbSim:
             self.vars[idx] = v & 0xFFFF if v >= 0 else v
             if not -32768 <= v <= 32767:
                 self.vars[idx] = ((v + 32768) % 65536) - 32768  # int16 wrap
-            return "ok", pc, ret
+            return "ok", pc
         raise self._err(line_no, f"неизвестно: {ln[:30]!r}")
 
 
